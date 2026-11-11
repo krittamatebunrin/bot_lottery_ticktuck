@@ -1,0 +1,52 @@
+name: Daily Lottery Generator
+
+on:
+  schedule:
+    - cron: '18 17 * * *' # 00:18 Asia/Bangkok (UTC+7)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: true
+        default: 'dry_run_sample'
+        type: choice
+        options:
+          - dry_run_sample
+          - dry_run_all
+          - live_send
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Thai text shaping libraries (libraqm)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libraqm0 libfribidi0 libharfbuzz0b
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate and send images
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_MODE: ${{ github.event.inputs.mode || 'live_send' }}
+        run: python main.py --mode "$RUN_MODE"
+
+      - name: Upload preview artifacts (dry-run modes only)
+        if: ${{ (github.event.inputs.mode || 'live_send') != 'live_send' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-images
+          path: output/
+          retention-days: 7
