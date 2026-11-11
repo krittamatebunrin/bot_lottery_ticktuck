@@ -18,6 +18,8 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -50,3 +52,19 @@ jobs:
           name: preview-images
           path: output/
           retention-days: 7
+
+      - name: Keep repository active (prevent 60-day pause)
+        if: github.event_name == 'schedule'
+        run: |
+          LAST_COMMIT_TS=$(git log -1 --format=%ct)
+          NOW_TS=$(date +%s)
+          AGE_DAYS=$(( (NOW_TS - LAST_COMMIT_TS) / 86400 ))
+          echo "Days since last commit: $AGE_DAYS"
+          if [ "$AGE_DAYS" -ge 30 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive
+            git add .keepalive
+            git commit -m "chore: keep scheduled workflow active"
+            git push
+          fi
