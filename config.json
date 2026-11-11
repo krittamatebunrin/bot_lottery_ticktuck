@@ -8,6 +8,7 @@
       "double_header": true,
       "layout": {
         "flag_box": { "x": 0.03, "y": 0.03, "w": 0.24, "h": 0.16 },
+        "flag_cat": { "image": "cat.jpg", "max_w": 0.15, "max_h": 0.105, "overlap_y": 0.005 },
         "title": {
           "x": 0.29,
           "y": 0.125,
@@ -20,7 +21,7 @@
         },
         "date": {
           "x": 0.85,
-          "y": 0.075,
+          "y": 0.052,
           "font": "Mali-SemiBold.ttf",
           "size": 0.042,
           "fill": "#FFD700",
@@ -29,7 +30,7 @@
           "anchor": "mm"
         },
         "main_pair": {
-          "x": 0.35  ,
+          "x": 0.35,
           "y": 0.36,
           "font": "Mali-Bold.ttf",
           "size": 0.14,
@@ -150,8 +151,8 @@
           "flag": "Japan.png",
           "pair_group": "nikkei",
           "title_lines": [
-            { "text": "นิเคอิเช้า", "x": 0.130, "y": 0.205, "size": 0.056 },
-            { "text": "+ vip", "x": 0.265, "y": 0.290, "size": 0.060 }
+            { "text": "นิเคอิเช้า", "x": 0.020, "y": 0.205, "size": 0.054, "anchor": "ls" },
+            { "text": "+ vip", "x": 0.255, "y": 0.285, "size": 0.058 }
           ]
         },
         {
@@ -159,71 +160,71 @@
           "pair_group": "china",
           "title_lines": [
             { "text": "จีนเช้า", "x": 0.130, "y": 0.205, "size": 0.058 },
-            { "text": "+ vip", "x": 0.265, "y": 0.290, "size": 0.060 }
+            { "text": "+ vip", "x": 0.265, "y": 0.285, "size": 0.058 }
           ]
         },
         {
           "flag": "Hongkong.png",
           "pair_group": "hangseng",
           "title_lines": [
-            { "text": "ฮั่งเส็งเช้า", "x": 0.130, "y": 0.205, "size": 0.056 },
-            { "text": "+ vip", "x": 0.265, "y": 0.290, "size": 0.060 }
+            { "text": "ฮั่งเส็งเช้า", "x": 0.020, "y": 0.205, "size": 0.052, "anchor": "ls" },
+            { "text": "+ vip", "x": 0.265, "y": 0.285, "size": 0.058 }
           ]
         },
         {
           "flag": "Taiwan.png",
           "title_lines": [
-            { "text": "หุ้นไต้หวัน", "x": 0.135, "y": 0.205, "size": 0.054 },
-            { "text": "+ vip", "x": 0.275, "y": 0.290, "size": 0.060 }
+            { "text": "หุ้นไต้หวัน", "x": 0.020, "y": 0.205, "size": 0.052, "anchor": "ls" },
+            { "text": "+ vip", "x": 0.265, "y": 0.285, "size": 0.058 }
           ]
         },
         {
           "flag": "Korea.png",
           "title_lines": [
             { "text": "หุ้นเกาหลี", "x": 0.145, "y": 0.205, "size": 0.054 },
-            { "text": "VIP", "x": 0.315, "y": 0.275, "size": 0.056 }
+            { "text": "+ vip", "x": 0.275, "y": 0.275, "size": 0.054 }
           ]
         },
         {
           "flag": "Japan.png",
           "pair_group": "nikkei",
           "title_lines": [
-            { "text": "นิเคอิบ่าย", "x": 0.135, "y": 0.205, "size": 0.056 },
-            { "text": "+ vip", "x": 0.285, "y": 0.285, "size": 0.058 }
+            { "text": "นิเคอิบ่าย", "x": 0.020, "y": 0.205, "size": 0.054, "anchor": "ls" },
+            { "text": "+ vip", "x": 0.265, "y": 0.285, "size": 0.058 }
           ]
         },
         {
           "flag": "China.png",
           "pair_group": "china",
           "title_lines": [
-            { "text": "จีนบ่าย", "x": 0.135, "y": 0.205, "size": 0.058 },
-            { "text": "+ vip", "x": 0.265, "y": 0.285, "size": 0.060 }
+            { "text": "จีนบ่าย", "x": 0.130, "y": 0.205, "size": 0.058 },
+            { "text": "+ vip", "x": 0.265, "y": 0.285, "size": 0.058 }
           ]
         },
         {
           "flag": "Hongkong.png",
           "pair_group": "hangseng",
           "title_lines": [
-            { "text": "ฮั่งเส็งบ่าย", "x": 0.135, "y": 0.205, "size": 0.054 },
-            { "text": "+ vip", "x": 0.255, "y": 0.290, "size": 0.058 }
+            { "text": "ฮั่งเส็งบ่าย", "x": 0.020, "y": 0.205, "size": 0.052, "anchor": "ls" },
+            { "text": "+ vip", "x": 0.265, "y": 0.285, "size": 0.058 }
           ]
         },
-        { "title": "ลาวสตาร์", "flag": "Lao.png" },
-        { "title": "ฮานอยกาชาด", "flag": "Vietnam.png" },
-        { "title": "ลาวสามัคคี", "flag": "Lao.png" },
+        { "title": "ลาวสตาร์", "flag": "Lao.png", "title_x": 0.025, "title_anchor": "ls", "title_size": 0.056 },
+        { "title": "ฮานอยกาชาด", "flag": "Vietnam.png", "title_x": 0.020, "title_anchor": "ls", "title_size": 0.050 },
+        { "title": "ลาวสามัคคี", "flag": "Lao.png", "title_x": 0.020, "title_anchor": "ls", "title_size": 0.054 },
         { "title": "3 รัฐ", "flag": "3State.png" },
         { "title": "ลาว TV", "flag": "Lao.png" },
-        { "title": "ฮานอย HD", "flag": "Vietnam.png", "title_x": 0.030, "title_anchor": "ls" },
-        { "title": "ฮานอยสตาร์", "flag": "Vietnam.png", "title_x": 0.050, "title_anchor": "ls" },
+        { "title": "ฮานอย HD", "flag": "Vietnam.png", "title_x": 0.020, "title_anchor": "ls", "title_size": 0.055 },
+        { "title": "ฮานอยสตาร์", "flag": "Vietnam.png", "title_x": 0.020, "title_anchor": "ls", "title_size": 0.052 },
         { "title": "ลาว HD", "flag": "Lao.png" },
-        { "title": "ฮานอย TV", "flag": "Vietnam.png" },
-        { "title": "ลาวพัฒนา", "flag": "Lao.png" },
-        { "title": "ลาว VIP", "flag": "Lao.png" },
-        { "title": "ลาวกาชาด", "flag": "Lao.png" },
-        { "title": "ฮานอยเอ็กตร้า", "flag": "Vietnam.png", "title_x": 0.015, "title_anchor": "ls", "title_size": 0.052 },
-        { "title": "ดาวโจนส์", "flag": "USA.png", "pair_group": "dowjones" },
-        { "title": "ดาวโจนส์ VIP", "flag": "USA.png", "pair_group": "dowjones", "title_x": 0.015, "title_anchor": "ls", "title_size": 0.054 },
-        { "title": "นอยพิเศษ นอยปกติ นอยวี", "flag": "Vietnam.png", "title_x": 0.010, "title_anchor": "ls", "title_size": 0.028 }
+        { "title": "ฮานอย TV", "flag": "Vietnam.png", "title_x": 0.020, "title_anchor": "ls", "title_size": 0.055 },
+        { "title": "ลาวพัฒนา", "flag": "Lao.png", "title_x": 0.020, "title_anchor": "ls", "title_size": 0.055 },
+        { "title": "ลาว VIP", "flag": "Lao.png", "title_x": 0.030, "title_anchor": "ls", "title_size": 0.056 },
+        { "title": "ลาวกาชาด", "flag": "Lao.png", "title_x": 0.020, "title_anchor": "ls", "title_size": 0.053 },
+        { "title": "ฮานอยเอ็กตร้า", "flag": "Vietnam.png", "title_x": 0.018, "title_anchor": "ls", "title_size": 0.048 },
+        { "title": "ดาวโจนส์", "flag": "USA.png", "pair_group": "dowjones", "title_x": 0.025, "title_anchor": "ls", "title_size": 0.055 },
+        { "title": "ดาวโจนส์ VIP", "flag": "USA.png", "pair_group": "dowjones", "title_x": 0.018, "title_anchor": "ls", "title_size": 0.048 },
+        { "title": "นอยพิเศษ นอยปกติ นอยวี", "flag": "Vietnam.png", "title_x": 0.012, "title_anchor": "ls", "title_size": 0.028 }
       ]
     },
     {
