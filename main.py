@@ -55,7 +55,6 @@ def load_cutout_cat(filename: str) -> Image.Image:
     w, h = img.size
     px = img.load()
 
-    # If already transparent PNG, just crop tight to bounding box
     corner_alphas = [px[0, 0][3], px[w - 1, 0][3], px[0, h - 1][3], px[w - 1, h - 1][3]]
     if all(a < 10 for a in corner_alphas):
         bbox = img.getbbox()
@@ -63,7 +62,6 @@ def load_cutout_cat(filename: str) -> Image.Image:
         CAT_CACHE[filename] = result
         return result
 
-    # 1. Flood-fill exterior white/near-white background from image borders
     visited = bytearray(w * h)
     q = deque()
 
@@ -95,7 +93,6 @@ def load_cutout_cat(filename: str) -> Image.Image:
                     visited[nidx] = 1
                     q.append((nx, ny))
 
-    # 2. Drop tiny disconnected corner marks while keeping the cat and nearby details
     comp_seen = bytearray(w * h)
     components: list[tuple[list[tuple[int, int]], tuple[int, int, int, int]]] = []
     for y in range(h):
@@ -143,7 +140,6 @@ def load_cutout_cat(filename: str) -> Image.Image:
                     r, g, b, _ = px[px_x, px_y]
                     px[px_x, px_y] = (r, g, b, 0)
 
-    # 3. Soften outer light fringe pixels touching transparent background
     edge_updates: list[tuple[int, int, int]] = []
     for y in range(h):
         for x in range(w):
@@ -337,14 +333,12 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
     canvas = Image.open(tpl_path).convert("RGBA")
     layout = tpl_cfg["layout"]
 
-    # 1. Flag layer + optional hanging cat directly underneath flag
     flag_rect = None
     if market.get("flag") and "flag_box" in layout:
         flag_rect = paste_flag_contain(canvas, market["flag"], layout["flag_box"])
     if flag_rect is not None and "flag_cat" in layout:
         paste_cat_below_flag(canvas, flag_rect, layout["flag_cat"])
 
-    # 2. Title layer
     title_base = layout["title"]
     if "title_lines" in market:
         for line in market["title_lines"]:
@@ -374,7 +368,6 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
             stroke_width_norm=title_base.get("stroke_width", 0.0),
         )
 
-    # 3. Date layer
     d_cfg = layout["date"]
     draw_styled_text(
         canvas,
@@ -389,7 +382,6 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
         stroke_width_norm=d_cfg.get("stroke_width", 0.0),
     )
 
-    # 4. Optional static label (Template 4 "เน้น")
     if "static_label" in layout:
         lbl = layout["static_label"]
         draw_styled_text(
@@ -403,7 +395,6 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
             anchor=lbl["anchor"],
         )
 
-    # 5. Main pair header
     mp = layout["main_pair"]
     draw_styled_text(
         canvas,
@@ -419,7 +410,6 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
         gradient=mp.get("gradient"),
     )
 
-    # 6. Two-digit grid
     g_cfg = layout["grid"]
     if g_cfg["mode"] == "columns":
         for row_idx, val in enumerate(numbers["row_a"]):
@@ -466,7 +456,6 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
                 stroke_width_norm=g_cfg.get("stroke_width", 0.0),
             )
 
-    # 7. Three-digit outputs
     td_cfg = layout["three_digits"]
     if td_cfg["mode"] == "stack":
         for idx, val in enumerate(numbers["three_digits"]):
@@ -535,22 +524,28 @@ def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
 
 
 def send_template_group(
-    token: str, chat_id: str, caption_header: str, image_paths: list[Path]
+    token: str, chat_id: str, header_text: str, image_paths: list[Path]
 ) -> str:
     base_url = f"https://api.telegram.org/bot{token}"
-    chunk_size = 10
 
+    # 1. Send header text as its own message before the images
+    chat_id = telegram_request(
+        f"{base_url}/sendMessage",
+        data={"chat_id": chat_id, "text": header_text},
+    )
+    time.sleep(1.0)
+
+    # 2. Send images cleanly without captions
+    chunk_size = 10
     for start in range(0, len(image_paths), chunk_size):
         chunk = image_paths[start : start + chunk_size]
-        caption = caption_header if start == 0 else None
 
         if len(chunk) == 1:
             with open(chunk[0], "rb") as f:
-                data = {"chat_id": chat_id}
-                if caption:
-                    data["caption"] = caption
                 chat_id = telegram_request(
-                    f"{base_url}/sendPhoto", data=data, files={"photo": f}
+                    f"{base_url}/sendPhoto",
+                    data={"chat_id": chat_id},
+                    files={"photo": f},
                 )
         else:
             media = []
@@ -559,10 +554,7 @@ def send_template_group(
                 for idx, p in enumerate(chunk):
                     field = f"file_{idx}"
                     files[field] = stack.enter_context(open(p, "rb"))
-                    item = {"type": "photo", "media": f"attach://{field}"}
-                    if idx == 0 and caption:
-                        item["caption"] = caption
-                    media.append(item)
+                    media.append({"type": "photo", "media": f"attach://{field}"})
 
                 chat_id = telegram_request(
                     f"{base_url}/sendMediaGroup",
@@ -614,16 +606,16 @@ def main() -> None:
             render_card(tpl, market, nums, date_str, out_path)
             tpl_paths.append(out_path)
 
-        caption = f"📌 {tpl['label']} ({len(markets)} หวย) ประจำวันที่ {date_str}"
-        generated_by_template.append((tpl_id, caption, tpl_paths))
+        header_text = f"📌 {tpl['label']} ({len(markets)} หวย) ประจำวันที่ {date_str}"
+        generated_by_template.append((tpl_id, header_text, tpl_paths))
         print(f"[{tpl_id}] Generated {len(tpl_paths)} images (date={date_str})")
 
     if args.mode == "live_send":
         token = os.environ["TELEGRAM_BOT_TOKEN"].strip().strip('"').strip("'")
         chat_id = os.environ["TELEGRAM_CHAT_ID"].strip().strip('"').strip("'")
-        for tpl_id, caption, paths in generated_by_template:
+        for tpl_id, header_text, paths in generated_by_template:
             print(f"Sending {tpl_id} ({len(paths)} images) to Telegram...")
-            chat_id = send_template_group(token, chat_id, caption, paths)
+            chat_id = send_template_group(token, chat_id, header_text, paths)
         print("All 97 images delivered.")
 
 
