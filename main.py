@@ -501,24 +501,42 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
     canvas.convert("RGB").save(out_path, format="JPEG", quality=95)
 
 
-def telegram_request(url: str, data: dict, files: dict | None = None) -> None:
-    for attempt in range(5):
+def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
+    for _ in range(5):
+        if files:
+            for item in files.values():
+                f_obj = item[1] if isinstance(item, tuple) else item
+                f_obj.seek(0)
         resp = requests.post(url, data=data, files=files, timeout=60)
         if resp.status_code == 429:
             retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
             time.sleep(retry_after + 1)
             continue
-        resp.raise_for_status()
+        if resp.status_code == 400:
+            try:
+                err = resp.json()
+            except ValueError:
+                err = {}
+            new_chat_id = err.get("parameters", {}).get("migrate_to_chat_id")
+            if new_chat_id and "chat_id" in data:
+                print(
+                    f"Group upgraded to supergroup. Auto-switching chat_id to {new_chat_id} "
+                    "(please update TELEGRAM_CHAT_ID in GitHub Secrets)."
+                )
+                data["chat_id"] = str(new_chat_id)
+                continue
+        if not resp.ok:
+            raise RuntimeError(f"Telegram HTTP {resp.status_code}: {resp.text}")
         payload = resp.json()
         if not payload.get("ok"):
             raise RuntimeError(f"Telegram API error: {payload}")
-        return
+        return str(data.get("chat_id", ""))
     raise RuntimeError(f"Telegram API failed after retries: {url}")
 
 
 def send_template_group(
     token: str, chat_id: str, caption_header: str, image_paths: list[Path]
-) -> None:
+) -> str:
     base_url = f"https://api.telegram.org/bot{token}"
     chunk_size = 10
 
@@ -531,7 +549,9 @@ def send_template_group(
                 data = {"chat_id": chat_id}
                 if caption:
                     data["caption"] = caption
-                telegram_request(f"{base_url}/sendPhoto", data=data, files={"photo": f})
+                chat_id = telegram_request(
+                    f"{base_url}/sendPhoto", data=data, files={"photo": f}
+                )
         else:
             media = []
             with ExitStack() as stack:
@@ -544,12 +564,13 @@ def send_template_group(
                         item["caption"] = caption
                     media.append(item)
 
-                telegram_request(
+                chat_id = telegram_request(
                     f"{base_url}/sendMediaGroup",
-                    data={"chat_id": chat_id, "media": json.dumps(media, ensure_ascii=False)},
+                    data={"chat_id": chat_id, "media": json.dumps(media)},
                     files=files,
                 )
         time.sleep(3.5)
+    return chat_id
 
 
 def main() -> None:
@@ -598,11 +619,11 @@ def main() -> None:
         print(f"[{tpl_id}] Generated {len(tpl_paths)} images (date={date_str})")
 
     if args.mode == "live_send":
-        token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-        chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
+        token = os.environ["TELEGRAM_BOT_TOKEN"].strip().strip('"').strip("'")
+        chat_id = os.environ["TELEGRAM_CHAT_ID"].strip().strip('"').strip("'")
         for tpl_id, caption, paths in generated_by_template:
             print(f"Sending {tpl_id} ({len(paths)} images) to Telegram...")
-            send_template_group(token, chat_id, caption, paths)
+            chat_id = send_template_group(token, chat_id, caption, paths)
         print("All 97 images delivered.")
 
 
