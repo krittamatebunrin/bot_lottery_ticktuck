@@ -3,6 +3,7 @@ import json
 import os
 import random
 import time
+from collections import deque
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps, features
 ICT = timezone(timedelta(hours=7))
 BASE_DIR = Path(__file__).resolve().parent
 FONT_CACHE: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+CAT_CACHE: dict[str, Image.Image] = {}
 
 
 def resolve_file(directory: Path, filename: str) -> Path:
@@ -20,8 +22,12 @@ def resolve_file(directory: Path, filename: str) -> Path:
     if direct.exists():
         return direct
     target_lower = filename.lower()
+    target_stem = Path(filename).stem.lower()
     for item in directory.iterdir():
         if item.is_file() and item.name.lower() == target_lower:
+            return item
+    for item in directory.iterdir():
+        if item.is_file() and item.stem.lower() == target_stem:
             return item
     raise FileNotFoundError(f"Missing file '{filename}' in {directory}")
 
@@ -37,6 +43,131 @@ def get_font(font_filename: str, size_px: int) -> ImageFont.FreeTypeFont:
         else:
             FONT_CACHE[key] = ImageFont.truetype(str(font_path), size=size_px)
     return FONT_CACHE[key]
+
+
+def load_cutout_cat(filename: str) -> Image.Image:
+    if filename in CAT_CACHE:
+        return CAT_CACHE[filename]
+
+    cat_path = resolve_file(BASE_DIR / "assets", filename)
+    img = Image.open(cat_path).convert("RGBA")
+    img = ImageOps.contain(img, (480, 480), method=Image.Resampling.LANCZOS)
+    w, h = img.size
+    px = img.load()
+
+    # If already transparent PNG, just crop tight to bounding box
+    corner_alphas = [px[0, 0][3], px[w - 1, 0][3], px[0, h - 1][3], px[w - 1, h - 1][3]]
+    if all(a < 10 for a in corner_alphas):
+        bbox = img.getbbox()
+        result = img.crop(bbox) if bbox else img
+        CAT_CACHE[filename] = result
+        return result
+
+    # 1. Flood-fill exterior white/near-white background from image borders
+    visited = bytearray(w * h)
+    q = deque()
+
+    def is_bg(x: int, y: int) -> bool:
+        r, g, b, a = px[x, y]
+        return a < 10 or (r >= 225 and g >= 225 and b >= 225)
+
+    for x in range(w):
+        for y in (0, h - 1):
+            idx = y * w + x
+            if not visited[idx] and is_bg(x, y):
+                visited[idx] = 1
+                q.append((x, y))
+    for y in range(h):
+        for x in (0, w - 1):
+            idx = y * w + x
+            if not visited[idx] and is_bg(x, y):
+                visited[idx] = 1
+                q.append((x, y))
+
+    while q:
+        cx, cy = q.popleft()
+        r, g, b, _ = px[cx, cy]
+        px[cx, cy] = (r, g, b, 0)
+        for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+            if 0 <= nx < w and 0 <= ny < h:
+                nidx = ny * w + nx
+                if not visited[nidx] and is_bg(nx, ny):
+                    visited[nidx] = 1
+                    q.append((nx, ny))
+
+    # 2. Drop tiny disconnected corner marks while keeping the cat and nearby details
+    comp_seen = bytearray(w * h)
+    components: list[tuple[list[tuple[int, int]], tuple[int, int, int, int]]] = []
+    for y in range(h):
+        for x in range(w):
+            idx = y * w + x
+            if px[x, y][3] > 0 and not comp_seen[idx]:
+                comp_seen[idx] = 1
+                cq = deque([(x, y)])
+                pts = []
+                x0 = x1 = x
+                y0 = y1 = y
+                while cq:
+                    px_x, px_y = cq.popleft()
+                    pts.append((px_x, px_y))
+                    if px_x < x0:
+                        x0 = px_x
+                    if px_x > x1:
+                        x1 = px_x
+                    if px_y < y0:
+                        y0 = px_y
+                    if px_y > y1:
+                        y1 = px_y
+                    for dx in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            if dx == 0 and dy == 0:
+                                continue
+                            nx, ny = px_x + dx, px_y + dy
+                            if 0 <= nx < w and 0 <= ny < h:
+                                nidx = ny * w + nx
+                                if px[nx, ny][3] > 0 and not comp_seen[nidx]:
+                                    comp_seen[nidx] = 1
+                                    cq.append((nx, ny))
+                components.append((pts, (x0, y0, x1, y1)))
+
+    if components:
+        main_pts, (mx0, my0, mx1, my1) = max(components, key=lambda c: len(c[0]))
+        min_keep_area = max(10, int(len(main_pts) * 0.03))
+        pad = 20
+        for pts, (bx0, by0, bx1, by1) in components:
+            near_main = not (
+                bx1 < mx0 - pad or bx0 > mx1 + pad or by1 < my0 - pad or by0 > my1 + pad
+            )
+            if len(pts) < min_keep_area and not near_main:
+                for px_x, px_y in pts:
+                    r, g, b, _ = px[px_x, px_y]
+                    px[px_x, px_y] = (r, g, b, 0)
+
+    # 3. Soften outer light fringe pixels touching transparent background
+    edge_updates: list[tuple[int, int, int]] = []
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if a == 0:
+                continue
+            touches_bg = False
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if not (0 <= nx < w and 0 <= ny < h) or px[nx, ny][3] == 0:
+                    touches_bg = True
+                    break
+            if touches_bg:
+                m = min(r, g, b)
+                if m > 150:
+                    new_a = max(0, min(255, round((230 - m) / 80.0 * 255)))
+                    edge_updates.append((x, y, new_a))
+    for x, y, new_a in edge_updates:
+        r, g, b, _ = px[x, y]
+        px[x, y] = (r, g, b, new_a)
+
+    bbox = img.getbbox()
+    result = img.crop(bbox) if bbox else img
+    CAT_CACHE[filename] = result
+    return result
 
 
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
@@ -120,7 +251,9 @@ def draw_styled_text(
     canvas.paste(grad_img, (bx0, by0), mask)
 
 
-def paste_flag_contain(canvas: Image.Image, flag_filename: str, box_cfg: dict) -> None:
+def paste_flag_contain(
+    canvas: Image.Image, flag_filename: str, box_cfg: dict
+) -> tuple[int, int, int, int]:
     w, h = canvas.size
     flag_path = resolve_file(BASE_DIR / "assets" / "flags", flag_filename)
     flag_img = Image.open(flag_path).convert("RGBA")
@@ -132,6 +265,25 @@ def paste_flag_contain(canvas: Image.Image, flag_filename: str, box_cfg: dict) -
 
     fitted = ImageOps.contain(flag_img, (box_w, box_h), method=Image.Resampling.LANCZOS)
     canvas.paste(fitted, (box_x, box_y), fitted)
+    return (box_x, box_y, fitted.size[0], fitted.size[1])
+
+
+def paste_cat_below_flag(
+    canvas: Image.Image, flag_rect: tuple[int, int, int, int], cat_cfg: dict
+) -> None:
+    fx, fy, fw, fh = flag_rect
+    w, h = canvas.size
+    cat_img = load_cutout_cat(cat_cfg["image"])
+
+    max_w = round(cat_cfg["max_w"] * w)
+    max_h = round(cat_cfg["max_h"] * h)
+    fitted = ImageOps.contain(cat_img, (max_w, max_h), method=Image.Resampling.LANCZOS)
+    cw, _ = fitted.size
+
+    overlap_y = round(cat_cfg.get("overlap_y", 0.005) * h)
+    cat_x = fx + (fw - cw) // 2 + round(cat_cfg.get("offset_x", 0.0) * w)
+    cat_y = fy + fh - overlap_y
+    canvas.paste(fitted, (cat_x, cat_y), fitted)
 
 
 def generate_lottery_numbers(
@@ -185,11 +337,14 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
     canvas = Image.open(tpl_path).convert("RGBA")
     layout = tpl_cfg["layout"]
 
-    # 1. Flag layer (drawn under title so Template 2 overlaps cleanly)
+    # 1. Flag layer + optional hanging cat directly underneath flag
+    flag_rect = None
     if market.get("flag") and "flag_box" in layout:
-        paste_flag_contain(canvas, market["flag"], layout["flag_box"])
+        flag_rect = paste_flag_contain(canvas, market["flag"], layout["flag_box"])
+    if flag_rect is not None and "flag_cat" in layout:
+        paste_cat_below_flag(canvas, flag_rect, layout["flag_cat"])
 
-    # 2. Title layer (supports custom multi-line or resized entries)
+    # 2. Title layer
     title_base = layout["title"]
     if "title_lines" in market:
         for line in market["title_lines"]:
@@ -234,7 +389,7 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
         stroke_width_norm=d_cfg.get("stroke_width", 0.0),
     )
 
-    # 4. Optional static label (used for Template 4 missing "เน้น")
+    # 4. Optional static label (Template 4 "เน้น")
     if "static_label" in layout:
         lbl = layout["static_label"]
         draw_styled_text(
@@ -264,7 +419,7 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
         gradient=mp.get("gradient"),
     )
 
-    # 6. Two-digit grid (4x2 columns for T1; 2x4 horizontal rows for T2-T4)
+    # 6. Two-digit grid
     g_cfg = layout["grid"]
     if g_cfg["mode"] == "columns":
         for row_idx, val in enumerate(numbers["row_a"]):
@@ -311,7 +466,7 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
                 stroke_width_norm=g_cfg.get("stroke_width", 0.0),
             )
 
-    # 7. Three-digit outputs (horizontal row for T1-T2; vertical stack for T3-T4)
+    # 7. Three-digit outputs
     td_cfg = layout["three_digits"]
     if td_cfg["mode"] == "stack":
         for idx, val in enumerate(numbers["three_digits"]):
@@ -422,7 +577,7 @@ def main() -> None:
         markets = tpl["markets"]
 
         if args.mode == "dry_run_sample":
-            sample_indices = {0, 4, 8, 11, len(markets) - 1}
+            sample_indices = {0, 4, 9, 10, 11, 14, 16, len(markets) - 1}
             selected_markets = [(i, markets[i]) for i in sorted(sample_indices) if i < len(markets)]
         else:
             selected_markets = list(enumerate(markets))
