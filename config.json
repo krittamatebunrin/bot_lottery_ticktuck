@@ -224,7 +224,8 @@
         { "title": "ดาวโจนส์", "flag": "USA.png", "pair_group": "dowjones" },
         { "title": "ดาวโจนส์ VIP", "flag": "USA.png", "pair_group": "dowjones", "title_x": 0.015, "title_anchor": "ls", "title_size": 0.054 },
         { "title": "นอยพิเศษ นอยปกติ นอยวี", "flag": "Vietnam.png", "title_x": 0.010, "title_anchor": "ls", "title_size": 0.028 }
-      ],
+      ]
+    },
     {
       "id": "template_3",
       "label": "Template 3",
