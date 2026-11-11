@@ -8,7 +8,7 @@
       "double_header": true,
       "layout": {
         "flag_box": { "x": 0.03, "y": 0.03, "w": 0.24, "h": 0.16 },
-        "flag_cat": { "image": "cat.jpg", "max_w": 0.15, "max_h": 0.105, "overlap_y": 0.005 },
+        "flag_cat": { "image": "cat.jpg", "max_w": 0.21, "max_h": 0.115, "overlap_y": 0.005 },
         "title": {
           "x": 0.29,
           "y": 0.125,
