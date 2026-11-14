@@ -657,8 +657,8 @@ def main() -> None:
         print(f"[{tpl_id}] Generated {len(tpl_paths)} images (date={date_str})")
 
     if live:
+        today_th = format_thai_date(now_ict, "compact")
         if not generated_by_template:
-            today_th = format_thai_date(now_ict, "compact")
             msg = f"✅ ใบหวยประจำวันที่ {today_th} ส่งครบทุกชุดแล้ว (ข้ามการส่งซ้ำ)"
             print(msg)
             telegram_request(
@@ -674,7 +674,18 @@ def main() -> None:
             total_sent += len(paths)
             existing_state.add(f"{day_key}/{tpl_id}")
             save_sent_state(state_path, existing_state, day_key)
-        print(f"All {total_sent} images delivered.")
+
+        total_all = sum(len(t["markets"]) for t in cfg["templates"])
+        if total_sent == total_all:
+            done_msg = f"✅ ส่งใบหวยประจำวันที่ {today_th} ครบทุกชุดแล้ว (รวม {total_sent} รูป)"
+        else:
+            done_msg = f"✅ ส่งใบหวยประจำวันที่ {today_th} ส่วนที่เหลือครบทุกชุดแล้ว (รอบนี้ {total_sent} รูป)"
+
+        print(done_msg)
+        telegram_request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": done_msg},
+        )
 
 
 if __name__ == "__main__":
