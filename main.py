@@ -172,7 +172,6 @@ def load_cutout_cat(filename: str) -> Image.Image:
 
     corner_alphas = [px[0, 0][3], px[w - 1, 0][3], px[0, h - 1][3], px[w - 1, h - 1][3]]
     if not all(a < 10 for a in corner_alphas):
-        # Opaque background: cut it out.
         _clear_border_background(px, w, h)
         _remove_small_specks(px, w, h)
         _feather_light_edges(px, w, h)
@@ -321,13 +320,7 @@ def paste_cat_below_flag(
 
 
 def open_template(path: Path) -> Image.Image:
-    """Open a card template as RGBA. A template with real transparency is first
-    flattened over white, so the final RGB export can't show stray colors.
-
-    Opaque templates (JPEG, opaque PNG) are returned unchanged. Don't flatten the
-    finished canvas instead: `paste` with an RGBA mask leaves partial alpha on soft
-    edges (e.g. the cat), and the final convert("RGB") correctly ignores it.
-    """
+    """Open a card template as RGBA, flattening real alpha over white if present."""
     img = open_rgba(path)
     if img.getchannel("A").getextrema()[0] < 255:
         background = Image.new("RGBA", img.size, (255, 255, 255, 255))
@@ -395,13 +388,16 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
     if flag_rect is not None and "flag_cat" in layout:
         paste_cat_below_flag(canvas, flag_rect, layout["flag_cat"])
 
-    # Title: either explicit per-line overrides, or one line with optional title_* overrides.
     title_base = layout["title"]
     if "title_lines" in market:
         for line in market["title_lines"]:
             draw_cfg_text(canvas, line["text"], {**title_base, **line})
     else:
-        overrides = {k: market[f"title_{k}"] for k in ("x", "y", "size", "anchor") if f"title_{k}" in market}
+        overrides = {
+            k: market[f"title_{k}"]
+            for k in ("x", "y", "size", "anchor")
+            if f"title_{k}" in market
+        }
         draw_cfg_text(canvas, market["title"], {**title_base, **overrides})
 
     draw_cfg_text(canvas, date_str, layout["date"])
@@ -469,7 +465,6 @@ def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
         except requests.exceptions.RequestException as exc:
             reason = _redact(f"{type(exc).__name__}: {exc}", url)
             if attempt == 4:
-                # `from None`: don't chain the original exception, its text embeds the token URL.
                 raise RuntimeError(
                     f"Telegram network error on {endpoint} after retries: {reason}"
                 ) from None
@@ -607,7 +602,6 @@ def main() -> None:
     has_raqm = features.check("raqm")
     print(f"libraqm active: {has_raqm}")
 
-    # Fail fast, before spending time rendering.
     token = chat_id = ""
     if live:
         if not has_raqm and not args.allow_no_raqm:
@@ -625,12 +619,13 @@ def main() -> None:
     out_root = BASE_DIR / "output"
     state_path = out_root / SENT_STATE_FILE
     day_key = now_ict.strftime("%Y-%m-%d")
-    sent_state = load_sent_state(state_path) if (live and args.skip_sent) else set()
+    existing_state = load_sent_state(state_path) if live else set()
+    skip_set = existing_state if args.skip_sent else set()
     generated_by_template: list[tuple[str, str, list[Path]]] = []
 
     for tpl in cfg["templates"]:
         tpl_id = tpl["id"]
-        if f"{day_key}/{tpl_id}" in sent_state:
+        if f"{day_key}/{tpl_id}" in skip_set:
             print(f"[{tpl_id}] Already sent today, skipping.")
             continue
 
@@ -662,14 +657,23 @@ def main() -> None:
         print(f"[{tpl_id}] Generated {len(tpl_paths)} images (date={date_str})")
 
     if live:
+        if not generated_by_template:
+            today_th = format_thai_date(now_ict, "compact")
+            msg = f"✅ ใบหวยประจำวันที่ {today_th} ส่งครบทุกชุดแล้ว (ข้ามการส่งซ้ำ)"
+            print(msg)
+            telegram_request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data={"chat_id": chat_id, "text": msg},
+            )
+            return
+
         total_sent = 0
         for tpl_id, header_text, paths in generated_by_template:
             print(f"Sending {tpl_id} ({len(paths)} images) to Telegram...")
             chat_id = send_template_group(token, chat_id, header_text, paths)
             total_sent += len(paths)
-            if args.skip_sent:
-                sent_state.add(f"{day_key}/{tpl_id}")
-                save_sent_state(state_path, sent_state, day_key)
+            existing_state.add(f"{day_key}/{tpl_id}")
+            save_sent_state(state_path, existing_state, day_key)
         print(f"All {total_sent} images delivered.")
 
 
