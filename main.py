@@ -15,6 +15,7 @@ ICT = timezone(timedelta(hours=7))
 BASE_DIR = Path(__file__).resolve().parent
 FONT_CACHE: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 CAT_CACHE: dict[str, Image.Image] = {}
+MAX_OUTPUT_SIDE = 1600
 
 
 def resolve_file(directory: Path, filename: str) -> Path:
@@ -289,12 +290,16 @@ def generate_lottery_numbers(
 ) -> dict:
     if pair_group:
         forbidden = used_pair_sets.setdefault(pair_group, set())
-        while True:
+        if len(forbidden) >= 45:
+            forbidden.clear()
+        for _ in range(500):
             a, b = random.sample(range(10), 2)
             pair_set = frozenset((a, b))
             if pair_set not in forbidden:
                 forbidden.add(pair_set)
                 break
+        else:
+            a, b = random.sample(range(10), 2)
     else:
         a, b = random.sample(range(10), 2)
 
@@ -487,7 +492,12 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.convert("RGB").save(out_path, format="JPEG", quality=95)
+    rgb_out = canvas.convert("RGB")
+    if max(rgb_out.size) > MAX_OUTPUT_SIDE:
+        rgb_out = ImageOps.contain(
+            rgb_out, (MAX_OUTPUT_SIDE, MAX_OUTPUT_SIDE), method=Image.Resampling.LANCZOS
+        )
+    rgb_out.save(out_path, format="JPEG", quality=88, optimize=True)
 
 
 def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
@@ -497,7 +507,7 @@ def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
                 f_obj = item[1] if isinstance(item, tuple) else item
                 f_obj.seek(0)
         try:
-            resp = requests.post(url, data=data, files=files, timeout=60)
+            resp = requests.post(url, data=data, files=files, timeout=(10, 60))
         except requests.exceptions.RequestException as exc:
             if attempt == 4:
                 raise RuntimeError(f"Telegram network error after retries: {exc}") from exc
@@ -507,7 +517,10 @@ def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
             continue
 
         if resp.status_code == 429:
-            retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+            try:
+                retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+            except ValueError:
+                retry_after = 5
             time.sleep(retry_after + 1)
             continue
         if resp.status_code == 400:
@@ -537,14 +550,12 @@ def send_template_group(
 ) -> str:
     base_url = f"https://api.telegram.org/bot{token}"
 
-    # 1. Send header text as its own message before the images
     chat_id = telegram_request(
         f"{base_url}/sendMessage",
         data={"chat_id": chat_id, "text": header_text},
     )
     time.sleep(1.0)
 
-    # 2. Send images cleanly without captions
     chunk_size = 10
     for start in range(0, len(image_paths), chunk_size):
         chunk = image_paths[start : start + chunk_size]
@@ -622,10 +633,12 @@ def main() -> None:
     if args.mode == "live_send":
         token = os.environ["TELEGRAM_BOT_TOKEN"].strip().strip('"').strip("'")
         chat_id = os.environ["TELEGRAM_CHAT_ID"].strip().strip('"').strip("'")
+        total_sent = 0
         for tpl_id, header_text, paths in generated_by_template:
             print(f"Sending {tpl_id} ({len(paths)} images) to Telegram...")
             chat_id = send_template_group(token, chat_id, header_text, paths)
-        print("All 97 images delivered.")
+            total_sent += len(paths)
+        print(f"All {total_sent} images delivered.")
 
 
 if __name__ == "__main__":
