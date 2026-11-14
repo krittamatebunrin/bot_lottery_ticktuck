@@ -12,6 +12,11 @@ on:
           - dry_run_sample
           - dry_run_all
           - live_send
+      skip_sent:
+        description: 'Skip templates already sent today (live_send only)'
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: lottery-bot-${{ github.ref }}
@@ -39,12 +44,21 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore today's sent state
+        uses: actions/cache@v4
+        with:
+          path: output/sent_state.json
+          key: sent-state-${{ github.run_id }}
+          restore-keys: |
+            sent-state-
+
       - name: Generate and send images
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_MODE: ${{ github.event.inputs.mode || 'live_send' }}
-        run: python main.py --mode "$RUN_MODE"
+          SKIP_SENT: ${{ github.event.inputs.skip_sent != false && '--skip-sent' || '' }}
+        run: python main.py --mode "$RUN_MODE" $SKIP_SENT
 
       - name: Upload preview artifacts (dry-run modes only)
         if: ${{ (github.event.inputs.mode || 'live_send') != 'live_send' }}
