@@ -491,12 +491,21 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
 
 
 def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
-    for _ in range(5):
+    for attempt in range(5):
         if files:
             for item in files.values():
                 f_obj = item[1] if isinstance(item, tuple) else item
                 f_obj.seek(0)
-        resp = requests.post(url, data=data, files=files, timeout=60)
+        try:
+            resp = requests.post(url, data=data, files=files, timeout=60)
+        except requests.exceptions.RequestException as exc:
+            if attempt == 4:
+                raise RuntimeError(f"Telegram network error after retries: {exc}") from exc
+            wait_s = 2 ** (attempt + 1)
+            print(f"Network error ({exc}), retrying in {wait_s}s...")
+            time.sleep(wait_s)
+            continue
+
         if resp.status_code == 429:
             retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
             time.sleep(retry_after + 1)
