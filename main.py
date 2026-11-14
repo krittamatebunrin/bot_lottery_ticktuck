@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -6,6 +8,7 @@ import time
 from collections import deque
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 
 import requests
@@ -16,19 +19,25 @@ BASE_DIR = Path(__file__).resolve().parent
 FONT_CACHE: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 CAT_CACHE: dict[str, Image.Image] = {}
 MAX_OUTPUT_SIDE = 1600
+SENT_STATE_FILE = "sent_state.json"
 
 
+# --------------------------------------------------------------------------- #
+# File / font helpers
+# --------------------------------------------------------------------------- #
 def resolve_file(directory: Path, filename: str) -> Path:
+    """Find `filename` in `directory`, tolerating case and extension differences."""
     direct = directory / filename
     if direct.exists():
         return direct
+    items = sorted(p for p in directory.iterdir() if p.is_file())
     target_lower = filename.lower()
     target_stem = Path(filename).stem.lower()
-    for item in directory.iterdir():
-        if item.is_file() and item.name.lower() == target_lower:
+    for item in items:
+        if item.name.lower() == target_lower:
             return item
-    for item in directory.iterdir():
-        if item.is_file() and item.stem.lower() == target_stem:
+    for item in items:
+        if item.stem.lower() == target_stem:
             return item
     raise FileNotFoundError(f"Missing file '{filename}' in {directory}")
 
@@ -36,52 +45,42 @@ def resolve_file(directory: Path, filename: str) -> Path:
 def get_font(font_filename: str, size_px: int) -> ImageFont.FreeTypeFont:
     key = (font_filename, size_px)
     if key not in FONT_CACHE:
-        font_path = resolve_file(BASE_DIR / "fonts", font_filename)
-        if features.check("raqm"):
-            FONT_CACHE[key] = ImageFont.truetype(
-                str(font_path), size=size_px, layout_engine=ImageFont.Layout.RAQM
-            )
-        else:
-            FONT_CACHE[key] = ImageFont.truetype(str(font_path), size=size_px)
+        font_path = str(resolve_file(BASE_DIR / "fonts", font_filename))
+        kwargs = {"layout_engine": ImageFont.Layout.RAQM} if features.check("raqm") else {}
+        FONT_CACHE[key] = ImageFont.truetype(font_path, size=size_px, **kwargs)
     return FONT_CACHE[key]
 
 
-def load_cutout_cat(filename: str) -> Image.Image:
-    if filename in CAT_CACHE:
-        return CAT_CACHE[filename]
+def open_rgba(path: Path) -> Image.Image:
+    with Image.open(path) as src:
+        return src.convert("RGBA")
 
-    cat_path = resolve_file(BASE_DIR / "assets", filename)
-    img = Image.open(cat_path).convert("RGBA")
-    img = ImageOps.contain(img, (480, 480), method=Image.Resampling.LANCZOS)
-    w, h = img.size
-    px = img.load()
 
-    corner_alphas = [px[0, 0][3], px[w - 1, 0][3], px[0, h - 1][3], px[w - 1, h - 1][3]]
-    if all(a < 10 for a in corner_alphas):
-        bbox = img.getbbox()
-        result = img.crop(bbox) if bbox else img
-        CAT_CACHE[filename] = result
-        return result
+# --------------------------------------------------------------------------- #
+# Cat cutout
+# --------------------------------------------------------------------------- #
+def crop_to_alpha(img: Image.Image) -> Image.Image:
+    """Crop to the non-transparent area (alpha channel only, any Pillow version)."""
+    bbox = img.getchannel("A").getbbox()
+    return img.crop(bbox) if bbox else img
 
-    visited = bytearray(w * h)
-    q = deque()
+
+def _clear_border_background(px, w: int, h: int) -> None:
+    """Flood-fill from the image border, making near-white / transparent pixels transparent."""
 
     def is_bg(x: int, y: int) -> bool:
         r, g, b, a = px[x, y]
         return a < 10 or (r >= 225 and g >= 225 and b >= 225)
 
-    for x in range(w):
-        for y in (0, h - 1):
-            idx = y * w + x
-            if not visited[idx] and is_bg(x, y):
-                visited[idx] = 1
-                q.append((x, y))
-    for y in range(h):
-        for x in (0, w - 1):
-            idx = y * w + x
-            if not visited[idx] and is_bg(x, y):
-                visited[idx] = 1
-                q.append((x, y))
+    visited = bytearray(w * h)
+    q: deque = deque()
+    seeds = [(x, y) for x in range(w) for y in (0, h - 1)]
+    seeds += [(x, y) for y in range(h) for x in (0, w - 1)]
+    for x, y in seeds:
+        idx = y * w + x
+        if not visited[idx] and is_bg(x, y):
+            visited[idx] = 1
+            q.append((x, y))
 
     while q:
         cx, cy = q.popleft()
@@ -94,6 +93,9 @@ def load_cutout_cat(filename: str) -> Image.Image:
                     visited[nidx] = 1
                     q.append((nx, ny))
 
+
+def _remove_small_specks(px, w: int, h: int) -> None:
+    """Drop tiny disconnected blobs that are not near the main subject."""
     comp_seen = bytearray(w * h)
     components: list[tuple[list[tuple[int, int]], tuple[int, int, int, int]]] = []
     for y in range(h):
@@ -102,19 +104,19 @@ def load_cutout_cat(filename: str) -> Image.Image:
             if px[x, y][3] > 0 and not comp_seen[idx]:
                 comp_seen[idx] = 1
                 cq = deque([(x, y)])
-                pts = []
+                pts: list[tuple[int, int]] = []
                 x0 = x1 = x
                 y0 = y1 = y
                 while cq:
-                    px_x, px_y = cq.popleft()
-                    pts.append((px_x, px_y))
-                    x0, x1 = min(x0, px_x), max(x1, px_x)
-                    y0, y1 = min(y0, px_y), max(y1, px_y)
+                    cx, cy = cq.popleft()
+                    pts.append((cx, cy))
+                    x0, x1 = min(x0, cx), max(x1, cx)
+                    y0, y1 = min(y0, cy), max(y1, cy)
                     for dx in (-1, 0, 1):
                         for dy in (-1, 0, 1):
                             if dx == 0 and dy == 0:
                                 continue
-                            nx, ny = px_x + dx, px_y + dy
+                            nx, ny = cx + dx, cy + dy
                             if 0 <= nx < w and 0 <= ny < h:
                                 nidx = ny * w + nx
                                 if px[nx, ny][3] > 0 and not comp_seen[nidx]:
@@ -122,18 +124,24 @@ def load_cutout_cat(filename: str) -> Image.Image:
                                     cq.append((nx, ny))
                 components.append((pts, (x0, y0, x1, y1)))
 
-    if components:
-        main_pts, (mx0, my0, mx1, my1) = max(components, key=lambda c: len(c[0]))
-        min_keep_area = max(10, int(len(main_pts) * 0.03))
-        pad = 20
-        for pts, (bx0, by0, bx1, by1) in components:
-            near_main = not (bx1 < mx0 - pad or bx0 > mx1 + pad or by1 < my0 - pad or by0 > my1 + pad)
-            if len(pts) < min_keep_area and not near_main:
-                for px_x, px_y in pts:
-                    r, g, b, _ = px[px_x, px_y]
-                    px[px_x, px_y] = (r, g, b, 0)
+    if not components:
+        return
+    main_pts, (mx0, my0, mx1, my1) = max(components, key=lambda c: len(c[0]))
+    min_keep_area = max(10, int(len(main_pts) * 0.03))
+    pad = 20
+    for pts, (bx0, by0, bx1, by1) in components:
+        near_main = not (
+            bx1 < mx0 - pad or bx0 > mx1 + pad or by1 < my0 - pad or by0 > my1 + pad
+        )
+        if len(pts) < min_keep_area and not near_main:
+            for cx, cy in pts:
+                r, g, b, _ = px[cx, cy]
+                px[cx, cy] = (r, g, b, 0)
 
-    edge_updates: list[tuple[int, int, int]] = []
+
+def _feather_light_edges(px, w: int, h: int) -> None:
+    """Soften light fringe pixels that touch the transparent background."""
+    updates: list[tuple[int, int, int]] = []
     for y in range(h):
         for x in range(w):
             r, g, b, a = px[x, y]
@@ -147,38 +155,66 @@ def load_cutout_cat(filename: str) -> Image.Image:
                 m = min(r, g, b)
                 if m > 150:
                     new_a = max(0, min(255, round((230 - m) / 80.0 * 255)))
-                    edge_updates.append((x, y, new_a))
-    for x, y, new_a in edge_updates:
+                    updates.append((x, y, min(a, new_a)))
+    for x, y, new_a in updates:
         r, g, b, _ = px[x, y]
         px[x, y] = (r, g, b, new_a)
 
-    bbox = img.getbbox()
-    result = img.crop(bbox) if bbox else img
+
+def load_cutout_cat(filename: str) -> Image.Image:
+    if filename in CAT_CACHE:
+        return CAT_CACHE[filename]
+
+    img = open_rgba(resolve_file(BASE_DIR / "assets", filename))
+    img = ImageOps.contain(img, (480, 480), method=Image.Resampling.LANCZOS)
+    w, h = img.size
+    px = img.load()
+
+    corner_alphas = [px[0, 0][3], px[w - 1, 0][3], px[0, h - 1][3], px[w - 1, h - 1][3]]
+    if not all(a < 10 for a in corner_alphas):
+        # Opaque background: cut it out.
+        _clear_border_background(px, w, h)
+        _remove_small_specks(px, w, h)
+        _feather_light_edges(px, w, h)
+
+    result = crop_to_alpha(img)
     CAT_CACHE[filename] = result
     return result
 
 
+# --------------------------------------------------------------------------- #
+# Drawing helpers
+# --------------------------------------------------------------------------- #
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     h = hex_color.lstrip("#")
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
-def build_vertical_gradient(width: int, height: int, stops: list[str]) -> Image.Image:
+@lru_cache(maxsize=128)
+def _cached_vertical_gradient(width: int, height: int, stops: tuple[str, ...]) -> Image.Image:
     rgb_stops = [hex_to_rgb(c) for c in stops]
-    grad = Image.new("RGBA", (width, height))
-    px = grad.load()
     n = len(rgb_stops) - 1
+    colors: list[tuple[int, int, int, int]] = []
     for y in range(height):
         t = y / max(height - 1, 1)
         seg = min(int(t * n), n - 1) if n > 0 else 0
         local_t = (t * n) - seg if n > 0 else 0.0
         c1, c2 = rgb_stops[seg], rgb_stops[min(seg + 1, n)]
-        r = int(c1[0] + (c2[0] - c1[0]) * local_t)
-        g = int(c1[1] + (c2[1] - c1[1]) * local_t)
-        b = int(c1[2] + (c2[2] - c1[2]) * local_t)
-        for x in range(width):
-            px[x, y] = (r, g, b, 255)
-    return grad
+        colors.append(
+            (
+                int(c1[0] + (c2[0] - c1[0]) * local_t),
+                int(c1[1] + (c2[1] - c1[1]) * local_t),
+                int(c1[2] + (c2[2] - c1[2]) * local_t),
+                255,
+            )
+        )
+    column = Image.new("RGBA", (1, height))
+    column.putdata(colors)
+    return column.resize((width, height), Image.Resampling.NEAREST)
+
+
+def build_vertical_gradient(width: int, height: int, stops: list[str]) -> Image.Image:
+    return _cached_vertical_gradient(width, height, tuple(stops))
 
 
 def draw_styled_text(
@@ -202,15 +238,25 @@ def draw_styled_text(
 
     if not gradient:
         draw.text(
-            (x, y), text, font=font, fill=fill, anchor=anchor,
-            stroke_width=sw, stroke_fill=stroke_color if sw > 0 else None,
+            (x, y),
+            text,
+            font=font,
+            fill=fill,
+            anchor=anchor,
+            stroke_width=sw,
+            stroke_fill=stroke_color if sw > 0 else None,
         )
         return
 
     if sw > 0 and stroke_color:
         draw.text(
-            (x, y), text, font=font, fill=stroke_color, anchor=anchor,
-            stroke_width=sw, stroke_fill=stroke_color,
+            (x, y),
+            text,
+            font=font,
+            fill=stroke_color,
+            anchor=anchor,
+            stroke_width=sw,
+            stroke_fill=stroke_color,
         )
 
     bx0, by0, bx1, by1 = draw.textbbox((x, y), text, font=font, anchor=anchor, stroke_width=0)
@@ -224,10 +270,34 @@ def draw_styled_text(
     canvas.paste(build_vertical_gradient(bw, bh, gradient), (bx0, by0), mask)
 
 
-def paste_flag_contain(canvas: Image.Image, flag_filename: str, box_cfg: dict) -> tuple[int, int, int, int]:
+def draw_cfg_text(
+    canvas: Image.Image,
+    text: str,
+    cfg: dict,
+    x: float | None = None,
+    y: float | None = None,
+) -> None:
+    """Draw text styled by a layout config block; x/y override the block's own position."""
+    draw_styled_text(
+        canvas,
+        text=text,
+        x_norm=cfg["x"] if x is None else x,
+        y_norm=cfg["y"] if y is None else y,
+        font_name=cfg["font"],
+        size_norm=cfg["size"],
+        fill=cfg["fill"],
+        anchor=cfg["anchor"],
+        stroke_color=cfg.get("stroke_color"),
+        stroke_width_norm=cfg.get("stroke_width", 0.0),
+        gradient=cfg.get("gradient"),
+    )
+
+
+def paste_flag_contain(
+    canvas: Image.Image, flag_filename: str, box_cfg: dict
+) -> tuple[int, int, int, int]:
     w, h = canvas.size
-    flag_path = resolve_file(BASE_DIR / "assets" / "flags", flag_filename)
-    flag_img = Image.open(flag_path).convert("RGBA")
+    flag_img = open_rgba(resolve_file(BASE_DIR / "assets" / "flags", flag_filename))
     box_x, box_y = round(box_cfg["x"] * w), round(box_cfg["y"] * h)
     box_w, box_h = round(box_cfg["w"] * w), round(box_cfg["h"] * h)
     fitted = ImageOps.contain(flag_img, (box_w, box_h), method=Image.Resampling.LANCZOS)
@@ -235,7 +305,9 @@ def paste_flag_contain(canvas: Image.Image, flag_filename: str, box_cfg: dict) -
     return (box_x, box_y, fitted.size[0], fitted.size[1])
 
 
-def paste_cat_below_flag(canvas: Image.Image, flag_rect: tuple[int, int, int, int], cat_cfg: dict) -> None:
+def paste_cat_below_flag(
+    canvas: Image.Image, flag_rect: tuple[int, int, int, int], cat_cfg: dict
+) -> None:
     fx, fy, fw, fh = flag_rect
     w, h = canvas.size
     cat_img = load_cutout_cat(cat_cfg["image"])
@@ -248,6 +320,24 @@ def paste_cat_below_flag(canvas: Image.Image, flag_rect: tuple[int, int, int, in
     canvas.paste(fitted, (cat_x, cat_y), fitted)
 
 
+def open_template(path: Path) -> Image.Image:
+    """Open a card template as RGBA. A template with real transparency is first
+    flattened over white, so the final RGB export can't show stray colors.
+
+    Opaque templates (JPEG, opaque PNG) are returned unchanged. Don't flatten the
+    finished canvas instead: `paste` with an RGBA mask leaves partial alpha on soft
+    edges (e.g. the cat), and the final convert("RGB") correctly ignores it.
+    """
+    img = open_rgba(path)
+    if img.getchannel("A").getextrema()[0] < 255:
+        background = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(background, img)
+    return img
+
+
+# --------------------------------------------------------------------------- #
+# Content generation
+# --------------------------------------------------------------------------- #
 def generate_lottery_numbers(
     used_pair_sets: dict[str, set[frozenset[int]]],
     pair_group: str | None,
@@ -291,9 +381,12 @@ def format_thai_date(now_ict: datetime, fmt: str) -> str:
     return f"{now_ict.day:02d}/{now_ict.month:02d}/{be_year:02d}"
 
 
+# --------------------------------------------------------------------------- #
+# Card rendering
+# --------------------------------------------------------------------------- #
 def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_path: Path) -> None:
     tpl_path = resolve_file(BASE_DIR / "assets" / "templates", tpl_cfg["base_image"])
-    canvas = Image.open(tpl_path).convert("RGBA")
+    canvas = open_template(tpl_path)
     layout = tpl_cfg["layout"]
 
     flag_rect = None
@@ -302,93 +395,41 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
     if flag_rect is not None and "flag_cat" in layout:
         paste_cat_below_flag(canvas, flag_rect, layout["flag_cat"])
 
+    # Title: either explicit per-line overrides, or one line with optional title_* overrides.
     title_base = layout["title"]
     if "title_lines" in market:
         for line in market["title_lines"]:
-            draw_styled_text(
-                canvas,
-                text=line["text"],
-                x_norm=line.get("x", title_base["x"]),
-                y_norm=line.get("y", title_base["y"]),
-                font_name=line.get("font", title_base["font"]),
-                size_norm=line.get("size", title_base["size"]),
-                fill=line.get("fill", title_base["fill"]),
-                anchor=line.get("anchor", title_base["anchor"]),
-                stroke_color=line.get("stroke_color", title_base.get("stroke_color")),
-                stroke_width_norm=line.get("stroke_width", title_base.get("stroke_width", 0.0)),
-            )
+            draw_cfg_text(canvas, line["text"], {**title_base, **line})
     else:
-        draw_styled_text(
-            canvas,
-            text=market["title"],
-            x_norm=market.get("title_x", title_base["x"]),
-            y_norm=market.get("title_y", title_base["y"]),
-            font_name=title_base["font"],
-            size_norm=market.get("title_size", title_base["size"]),
-            fill=title_base["fill"],
-            anchor=market.get("title_anchor", title_base["anchor"]),
-            stroke_color=title_base.get("stroke_color"),
-            stroke_width_norm=title_base.get("stroke_width", 0.0),
-        )
+        overrides = {k: market[f"title_{k}"] for k in ("x", "y", "size", "anchor") if f"title_{k}" in market}
+        draw_cfg_text(canvas, market["title"], {**title_base, **overrides})
 
-    d_cfg = layout["date"]
-    draw_styled_text(
-        canvas, text=date_str, x_norm=d_cfg["x"], y_norm=d_cfg["y"],
-        font_name=d_cfg["font"], size_norm=d_cfg["size"], fill=d_cfg["fill"],
-        anchor=d_cfg["anchor"], stroke_color=d_cfg.get("stroke_color"),
-        stroke_width_norm=d_cfg.get("stroke_width", 0.0),
-    )
+    draw_cfg_text(canvas, date_str, layout["date"])
 
     if "static_label" in layout:
         lbl = layout["static_label"]
-        draw_styled_text(
-            canvas, text=lbl["text"], x_norm=lbl["x"], y_norm=lbl["y"],
-            font_name=lbl["font"], size_norm=lbl["size"], fill=lbl["fill"], anchor=lbl["anchor"],
-        )
+        draw_cfg_text(canvas, lbl["text"], lbl)
 
-    mp = layout["main_pair"]
-    draw_styled_text(
-        canvas, text=numbers["header"], x_norm=mp["x"], y_norm=mp["y"],
-        font_name=mp["font"], size_norm=mp["size"], fill=mp["fill"], anchor=mp["anchor"],
-        stroke_color=mp.get("stroke_color"), stroke_width_norm=mp.get("stroke_width", 0.0),
-        gradient=mp.get("gradient"),
-    )
+    draw_cfg_text(canvas, numbers["header"], layout["main_pair"])
 
     g_cfg = layout["grid"]
     if g_cfg["mode"] == "columns":
-        for col_x, row_vals in ((g_cfg["col_a_x"], numbers["row_a"]), (g_cfg["col_b_x"], numbers["row_b"])):
+        for col_x, row_vals in (
+            (g_cfg["col_a_x"], numbers["row_a"]),
+            (g_cfg["col_b_x"], numbers["row_b"]),
+        ):
             for row_idx, val in enumerate(row_vals):
-                draw_styled_text(
-                    canvas, text=val, x_norm=col_x, y_norm=g_cfg["row_ys"][row_idx],
-                    font_name=g_cfg["font"], size_norm=g_cfg["size"], fill=g_cfg["fill"],
-                    anchor=g_cfg["anchor"], stroke_color=g_cfg.get("stroke_color"),
-                    stroke_width_norm=g_cfg.get("stroke_width", 0.0), gradient=g_cfg.get("gradient"),
-                )
+                draw_cfg_text(canvas, val, g_cfg, x=col_x, y=g_cfg["row_ys"][row_idx])
     else:
         for row_idx, pair_list in enumerate((numbers["row_a"], numbers["row_b"])):
-            draw_styled_text(
-                canvas, text=" ".join(pair_list), x_norm=g_cfg["x"], y_norm=g_cfg["row_ys"][row_idx],
-                font_name=g_cfg["font"], size_norm=g_cfg["size"], fill=g_cfg["fill"],
-                anchor=g_cfg["anchor"], stroke_color=g_cfg.get("stroke_color"),
-                stroke_width_norm=g_cfg.get("stroke_width", 0.0),
-            )
+            draw_cfg_text(canvas, " ".join(pair_list), g_cfg, y=g_cfg["row_ys"][row_idx])
 
     td_cfg = layout["three_digits"]
     if td_cfg["mode"] == "stack":
         for idx, val in enumerate(numbers["three_digits"]):
-            draw_styled_text(
-                canvas, text=val, x_norm=td_cfg["x"], y_norm=td_cfg["ys"][idx],
-                font_name=td_cfg["font"], size_norm=td_cfg["size"], fill=td_cfg["fill"],
-                anchor=td_cfg["anchor"], stroke_color=td_cfg.get("stroke_color"),
-                stroke_width_norm=td_cfg.get("stroke_width", 0.0),
-            )
+            draw_cfg_text(canvas, val, td_cfg, y=td_cfg["ys"][idx])
     else:
-        draw_styled_text(
-            canvas, text=" ".join(numbers["three_digits"]), x_norm=td_cfg["x"], y_norm=td_cfg["y"],
-            font_name=td_cfg["font"], size_norm=td_cfg["size"], fill=td_cfg["fill"],
-            anchor=td_cfg["anchor"], stroke_color=td_cfg.get("stroke_color"),
-            stroke_width_norm=td_cfg.get("stroke_width", 0.0), gradient=td_cfg.get("gradient"),
-        )
+        draw_cfg_text(canvas, " ".join(numbers["three_digits"]), td_cfg)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     rgb_out = canvas.convert("RGB")
@@ -399,7 +440,25 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
     rgb_out.save(out_path, format="JPEG", quality=88, optimize=True)
 
 
+# --------------------------------------------------------------------------- #
+# Telegram
+# --------------------------------------------------------------------------- #
+def _endpoint(url: str) -> str:
+    """Last path segment, e.g. 'sendPhoto' (never contains the bot token)."""
+    return url.rsplit("/", 1)[-1]
+
+
+def _redact(text: str, url: str) -> str:
+    """Remove the bot token embedded in `url` from `text`."""
+    if "/bot" in url:
+        token = url.split("/bot", 1)[1].split("/", 1)[0]
+        if token:
+            text = text.replace(token, "<redacted>")
+    return text
+
+
 def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
+    endpoint = _endpoint(url)
     for attempt in range(5):
         if files:
             for item in files.values():
@@ -408,10 +467,14 @@ def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
         try:
             resp = requests.post(url, data=data, files=files, timeout=(10, 60))
         except requests.exceptions.RequestException as exc:
+            reason = _redact(f"{type(exc).__name__}: {exc}", url)
             if attempt == 4:
-                raise RuntimeError(f"Telegram network error after retries: {exc}") from exc
+                # `from None`: don't chain the original exception, its text embeds the token URL.
+                raise RuntimeError(
+                    f"Telegram network error on {endpoint} after retries: {reason}"
+                ) from None
             wait_s = 2 ** (attempt + 1)
-            print(f"Network error ({exc}), retrying in {wait_s}s...")
+            print(f"Network error on {endpoint} ({reason}), retrying in {wait_s}s...")
             time.sleep(wait_s)
             continue
 
@@ -437,21 +500,23 @@ def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
                 continue
         if resp.status_code >= 500:
             if attempt == 4:
-                raise RuntimeError(f"Telegram HTTP {resp.status_code}: {resp.text}")
+                raise RuntimeError(f"Telegram HTTP {resp.status_code} on {endpoint}: {resp.text}")
             wait_s = 2 ** (attempt + 1)
             print(f"Telegram server HTTP {resp.status_code}, retrying in {wait_s}s...")
             time.sleep(wait_s)
             continue
         if not resp.ok:
-            raise RuntimeError(f"Telegram HTTP {resp.status_code}: {resp.text}")
+            raise RuntimeError(f"Telegram HTTP {resp.status_code} on {endpoint}: {resp.text}")
         try:
             payload = resp.json()
-        except ValueError as exc:
-            raise RuntimeError(f"Invalid JSON from Telegram: {resp.text[:200]}") from exc
+        except ValueError:
+            raise RuntimeError(
+                f"Invalid JSON from Telegram on {endpoint}: {resp.text[:200]}"
+            ) from None
         if not payload.get("ok"):
-            raise RuntimeError(f"Telegram API error: {payload}")
+            raise RuntimeError(f"Telegram API error on {endpoint}: {payload}")
         return str(data.get("chat_id", ""))
-    raise RuntimeError(f"Telegram API failed after retries: {url}")
+    raise RuntimeError(f"Telegram API failed after retries: {endpoint}")
 
 
 def send_template_group(token: str, chat_id: str, header_text: str, image_paths: list[Path]) -> str:
@@ -489,6 +554,36 @@ def send_template_group(token: str, chat_id: str, header_text: str, image_paths:
     return chat_id
 
 
+# --------------------------------------------------------------------------- #
+# State / env helpers
+# --------------------------------------------------------------------------- #
+def require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip().strip('"').strip("'")
+    if not value:
+        raise SystemExit(f"Missing required environment variable: {name}")
+    return value
+
+
+def load_sent_state(path: Path) -> set[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {str(k) for k in data} if isinstance(data, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def save_sent_state(path: Path, keys: set[str], day_key: str) -> None:
+    """Persist only today's keys so the file doesn't grow forever."""
+    todays = sorted(k for k in keys if k.startswith(f"{day_key}/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(todays), encoding="utf-8")
+    tmp.replace(path)
+
+
+# --------------------------------------------------------------------------- #
+# Entry point
+# --------------------------------------------------------------------------- #
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -496,25 +591,58 @@ def main() -> None:
         choices=["dry_run_sample", "dry_run_all", "live_send"],
         default="dry_run_sample",
     )
+    parser.add_argument(
+        "--skip-sent",
+        action="store_true",
+        help="live_send only: skip templates already sent today (tracked in output/sent_state.json).",
+    )
+    parser.add_argument(
+        "--allow-no-raqm",
+        action="store_true",
+        help="live_send only: send even if libraqm is missing (Thai text may render incorrectly).",
+    )
     args = parser.parse_args()
+    live = args.mode == "live_send"
 
-    print(f"libraqm active: {features.check('raqm')}")
+    has_raqm = features.check("raqm")
+    print(f"libraqm active: {has_raqm}")
+
+    # Fail fast, before spending time rendering.
+    token = chat_id = ""
+    if live:
+        if not has_raqm and not args.allow_no_raqm:
+            raise SystemExit(
+                "libraqm is not available, so Thai text would render incorrectly. "
+                "Install libraqm/libfribidi (or pass --allow-no-raqm to send anyway)."
+            )
+        token = require_env("TELEGRAM_BOT_TOKEN")
+        chat_id = require_env("TELEGRAM_CHAT_ID")
+
     with open(BASE_DIR / "config.json", "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
     now_ict = datetime.now(ICT)
     out_root = BASE_DIR / "output"
+    state_path = out_root / SENT_STATE_FILE
+    day_key = now_ict.strftime("%Y-%m-%d")
+    sent_state = load_sent_state(state_path) if (live and args.skip_sent) else set()
     generated_by_template: list[tuple[str, str, list[Path]]] = []
 
     for tpl in cfg["templates"]:
         tpl_id = tpl["id"]
+        if f"{day_key}/{tpl_id}" in sent_state:
+            print(f"[{tpl_id}] Already sent today, skipping.")
+            continue
+
         used_pair_sets: dict[str, set[frozenset[int]]] = {}
         date_str = format_thai_date(now_ict, tpl["date_format"])
         markets = tpl["markets"]
 
         if args.mode == "dry_run_sample":
             sample_indices = {0, 4, 9, 10, 11, 14, 16, len(markets) - 1}
-            selected_markets = [(i, markets[i]) for i in sorted(sample_indices) if i < len(markets)]
+            selected_markets = [
+                (i, markets[i]) for i in sorted(sample_indices) if 0 <= i < len(markets)
+            ]
         else:
             selected_markets = list(enumerate(markets))
 
@@ -533,14 +661,15 @@ def main() -> None:
         generated_by_template.append((tpl_id, header_text, tpl_paths))
         print(f"[{tpl_id}] Generated {len(tpl_paths)} images (date={date_str})")
 
-    if args.mode == "live_send":
-        token = os.environ["TELEGRAM_BOT_TOKEN"].strip().strip('"').strip("'")
-        chat_id = os.environ["TELEGRAM_CHAT_ID"].strip().strip('"').strip("'")
+    if live:
         total_sent = 0
         for tpl_id, header_text, paths in generated_by_template:
             print(f"Sending {tpl_id} ({len(paths)} images) to Telegram...")
             chat_id = send_template_group(token, chat_id, header_text, paths)
             total_sent += len(paths)
+            if args.skip_sent:
+                sent_state.add(f"{day_key}/{tpl_id}")
+                save_sent_state(state_path, sent_state, day_key)
         print(f"All {total_sent} images delivered.")
 
 
