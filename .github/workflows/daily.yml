@@ -44,26 +44,36 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore today's sent state
-        uses: actions/cache@v4
+      - name: Restore sent state
+        uses: actions/cache/restore@v4
         with:
           path: output/sent_state.json
-          key: sent-state-${{ github.run_id }}
+          key: sent-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             sent-state-
 
       - name: Generate and send images
+        shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_MODE: ${{ inputs.mode || 'live_send' }}
-          SKIP_SENT: ${{ (inputs.skip_sent == true || inputs.skip_sent == 'true') && '--skip-sent' || '' }}
+          SKIP_SENT: ${{ format('{0}', inputs.skip_sent) == 'true' && '--skip-sent' || '' }}
         run: python main.py --mode "$RUN_MODE" $SKIP_SENT
+
+      - name: Save sent state
+        if: always() && hashFiles('output/sent_state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: output/sent_state.json
+          key: sent-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload preview artifacts (dry-run modes only)
         if: ${{ (inputs.mode || 'live_send') != 'live_send' }}
         uses: actions/upload-artifact@v4
         with:
           name: preview-images
-          path: output/
+          path: |
+            output/
+            !output/sent_state.json
           retention-days: 7
