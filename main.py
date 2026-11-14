@@ -536,6 +536,13 @@ def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
                 )
                 data["chat_id"] = str(new_chat_id)
                 continue
+        if resp.status_code >= 500:
+            if attempt == 4:
+                raise RuntimeError(f"Telegram HTTP {resp.status_code}: {resp.text}")
+            wait_s = 2 ** (attempt + 1)
+            print(f"Telegram server HTTP {resp.status_code}, retrying in {wait_s}s...")
+            time.sleep(wait_s)
+            continue
         if not resp.ok:
             raise RuntimeError(f"Telegram HTTP {resp.status_code}: {resp.text}")
         payload = resp.json()
