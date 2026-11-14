@@ -581,4 +581,72 @@ def send_template_group(
                 for idx, p in enumerate(chunk):
                     field = f"file_{idx}"
                     files[field] = stack.enter_context(open(p, "rb"))
-                    media.append({"type": "photo", "media": f"attach
+                    media.append({"type": "photo", "media": f"attach://{field}"})
+
+                chat_id = telegram_request(
+                    f"{base_url}/sendMediaGroup",
+                    data={"chat_id": chat_id, "media": json.dumps(media)},
+                    files=files,
+                )
+        time.sleep(3.5)
+    return chat_id
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=["dry_run_sample", "dry_run_all", "live_send"],
+        default="dry_run_sample",
+    )
+    args = parser.parse_args()
+
+    print(f"libraqm active: {features.check('raqm')}")
+
+    with open(BASE_DIR / "config.json", "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    now_ict = datetime.now(ICT)
+    out_root = BASE_DIR / "output"
+    generated_by_template: list[tuple[str, str, list[Path]]] = []
+
+    for tpl in cfg["templates"]:
+        tpl_id = tpl["id"]
+        used_pair_sets: dict[str, set[frozenset[int]]] = {}
+        date_str = format_thai_date(now_ict, tpl["date_format"])
+        markets = tpl["markets"]
+
+        if args.mode == "dry_run_sample":
+            sample_indices = {0, 4, 9, 10, 11, 14, 16, len(markets) - 1}
+            selected_markets = [(i, markets[i]) for i in sorted(sample_indices) if i < len(markets)]
+        else:
+            selected_markets = list(enumerate(markets))
+
+        tpl_paths: list[Path] = []
+        for idx, market in selected_markets:
+            nums = generate_lottery_numbers(
+                used_pair_sets=used_pair_sets,
+                pair_group=market.get("pair_group"),
+                double_header=tpl["double_header"],
+            )
+            out_path = out_root / tpl_id / f"{idx + 1:02d}.jpg"
+            render_card(tpl, market, nums, date_str, out_path)
+            tpl_paths.append(out_path)
+
+        header_text = f"📌 {tpl['label']} ({len(markets)} หวย) ประจำวันที่ {date_str}"
+        generated_by_template.append((tpl_id, header_text, tpl_paths))
+        print(f"[{tpl_id}] Generated {len(tpl_paths)} images (date={date_str})")
+
+    if args.mode == "live_send":
+        token = os.environ["TELEGRAM_BOT_TOKEN"].strip().strip('"').strip("'")
+        chat_id = os.environ["TELEGRAM_CHAT_ID"].strip().strip('"').strip("'")
+        total_sent = 0
+        for tpl_id, header_text, paths in generated_by_template:
+            print(f"Sending {tpl_id} ({len(paths)} images) to Telegram...")
+            chat_id = send_template_group(token, chat_id, header_text, paths)
+            total_sent += len(paths)
+        print(f"All {total_sent} images delivered.")
+
+
+if __name__ == "__main__":
+    main()
