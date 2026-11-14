@@ -108,14 +108,8 @@ def load_cutout_cat(filename: str) -> Image.Image:
                 while cq:
                     px_x, px_y = cq.popleft()
                     pts.append((px_x, px_y))
-                    if px_x < x0:
-                        x0 = px_x
-                    if px_x > x1:
-                        x1 = px_x
-                    if px_y < y0:
-                        y0 = px_y
-                    if px_y > y1:
-                        y1 = px_y
+                    x0, x1 = min(x0, px_x), max(x1, px_x)
+                    y0, y1 = min(y0, px_y), max(y1, px_y)
                     for dx in (-1, 0, 1):
                         for dy in (-1, 0, 1):
                             if dx == 0 and dy == 0:
@@ -133,9 +127,7 @@ def load_cutout_cat(filename: str) -> Image.Image:
         min_keep_area = max(10, int(len(main_pts) * 0.03))
         pad = 20
         for pts, (bx0, by0, bx1, by1) in components:
-            near_main = not (
-                bx1 < mx0 - pad or bx0 > mx1 + pad or by1 < my0 - pad or by0 > my1 + pad
-            )
+            near_main = not (bx1 < mx0 - pad or bx0 > mx1 + pad or by1 < my0 - pad or by0 > my1 + pad)
             if len(pts) < min_keep_area and not near_main:
                 for px_x, px_y in pts:
                     r, g, b, _ = px[px_x, px_y]
@@ -147,11 +139,10 @@ def load_cutout_cat(filename: str) -> Image.Image:
             r, g, b, a = px[x, y]
             if a == 0:
                 continue
-            touches_bg = False
-            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-                if not (0 <= nx < w and 0 <= ny < h) or px[nx, ny][3] == 0:
-                    touches_bg = True
-                    break
+            touches_bg = any(
+                not (0 <= nx < w and 0 <= ny < h) or px[nx, ny][3] == 0
+                for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))
+            )
             if touches_bg:
                 m = min(r, g, b)
                 if m > 150:
@@ -206,32 +197,20 @@ def draw_styled_text(
     w, h = canvas.size
     font = get_font(font_name, max(12, round(size_norm * h)))
     sw = round(stroke_width_norm * h) if stroke_color and stroke_width_norm > 0 else 0
-    x = round(x_norm * w)
-    y = round(y_norm * h)
-
+    x, y = round(x_norm * w), round(y_norm * h)
     draw = ImageDraw.Draw(canvas)
 
     if not gradient:
         draw.text(
-            (x, y),
-            text,
-            font=font,
-            fill=fill,
-            anchor=anchor,
-            stroke_width=sw,
-            stroke_fill=stroke_color if sw > 0 else None,
+            (x, y), text, font=font, fill=fill, anchor=anchor,
+            stroke_width=sw, stroke_fill=stroke_color if sw > 0 else None,
         )
         return
 
     if sw > 0 and stroke_color:
         draw.text(
-            (x, y),
-            text,
-            font=font,
-            fill=stroke_color,
-            anchor=anchor,
-            stroke_width=sw,
-            stroke_fill=stroke_color,
+            (x, y), text, font=font, fill=stroke_color, anchor=anchor,
+            stroke_width=sw, stroke_fill=stroke_color,
         )
 
     bx0, by0, bx1, by1 = draw.textbbox((x, y), text, font=font, anchor=anchor, stroke_width=0)
@@ -241,42 +220,28 @@ def draw_styled_text(
     bw, bh = max(1, bx1 - bx0), max(1, by1 - by0)
 
     mask = Image.new("L", (bw, bh), 0)
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.text((x - bx0, y - by0), text, font=font, fill=255, anchor=anchor)
-
-    grad_img = build_vertical_gradient(bw, bh, gradient)
-    canvas.paste(grad_img, (bx0, by0), mask)
+    ImageDraw.Draw(mask).text((x - bx0, y - by0), text, font=font, fill=255, anchor=anchor)
+    canvas.paste(build_vertical_gradient(bw, bh, gradient), (bx0, by0), mask)
 
 
-def paste_flag_contain(
-    canvas: Image.Image, flag_filename: str, box_cfg: dict
-) -> tuple[int, int, int, int]:
+def paste_flag_contain(canvas: Image.Image, flag_filename: str, box_cfg: dict) -> tuple[int, int, int, int]:
     w, h = canvas.size
     flag_path = resolve_file(BASE_DIR / "assets" / "flags", flag_filename)
     flag_img = Image.open(flag_path).convert("RGBA")
-
-    box_x = round(box_cfg["x"] * w)
-    box_y = round(box_cfg["y"] * h)
-    box_w = round(box_cfg["w"] * w)
-    box_h = round(box_cfg["h"] * h)
-
+    box_x, box_y = round(box_cfg["x"] * w), round(box_cfg["y"] * h)
+    box_w, box_h = round(box_cfg["w"] * w), round(box_cfg["h"] * h)
     fitted = ImageOps.contain(flag_img, (box_w, box_h), method=Image.Resampling.LANCZOS)
     canvas.paste(fitted, (box_x, box_y), fitted)
     return (box_x, box_y, fitted.size[0], fitted.size[1])
 
 
-def paste_cat_below_flag(
-    canvas: Image.Image, flag_rect: tuple[int, int, int, int], cat_cfg: dict
-) -> None:
+def paste_cat_below_flag(canvas: Image.Image, flag_rect: tuple[int, int, int, int], cat_cfg: dict) -> None:
     fx, fy, fw, fh = flag_rect
     w, h = canvas.size
     cat_img = load_cutout_cat(cat_cfg["image"])
-
-    max_w = round(cat_cfg["max_w"] * w)
-    max_h = round(cat_cfg["max_h"] * h)
+    max_w, max_h = round(cat_cfg["max_w"] * w), round(cat_cfg["max_h"] * h)
     fitted = ImageOps.contain(cat_img, (max_w, max_h), method=Image.Resampling.LANCZOS)
     cw, _ = fitted.size
-
     overlap_y = round(cat_cfg.get("overlap_y", 0.005) * h)
     cat_x = fx + (fw - cw) // 2 + round(cat_cfg.get("offset_x", 0.0) * w)
     cat_y = fy + fh - overlap_y
@@ -305,25 +270,18 @@ def generate_lottery_numbers(
 
     units_a = sorted(random.sample([d for d in range(10) if d != a], 4))
     units_b = sorted(random.sample([d for d in range(10) if d != b], 4))
-
     row_a = [f"{a}{u}" for u in units_a]
     row_b = [f"{b}{u}" for u in units_b]
 
     tail_pool = row_a + row_b + [f"{a}{a}", f"{b}{b}"]
     chosen_tails = random.sample(tail_pool, 3)
-
     three_digits = []
     for tail in chosen_tails:
         valid_hundreds = [str(d) for d in range(1, 10) if not (str(d) == tail[0] == tail[1])]
         three_digits.append(random.choice(valid_hundreds) + tail)
 
     header = f"{a}{a}-{b}{b}" if double_header else f"{a}-{b}"
-    return {
-        "header": header,
-        "row_a": row_a,
-        "row_b": row_b,
-        "three_digits": three_digits,
-    }
+    return {"header": header, "row_a": row_a, "row_b": row_b, "three_digits": three_digits}
 
 
 def format_thai_date(now_ict: datetime, fmt: str) -> str:
@@ -375,89 +333,43 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
 
     d_cfg = layout["date"]
     draw_styled_text(
-        canvas,
-        text=date_str,
-        x_norm=d_cfg["x"],
-        y_norm=d_cfg["y"],
-        font_name=d_cfg["font"],
-        size_norm=d_cfg["size"],
-        fill=d_cfg["fill"],
-        anchor=d_cfg["anchor"],
-        stroke_color=d_cfg.get("stroke_color"),
+        canvas, text=date_str, x_norm=d_cfg["x"], y_norm=d_cfg["y"],
+        font_name=d_cfg["font"], size_norm=d_cfg["size"], fill=d_cfg["fill"],
+        anchor=d_cfg["anchor"], stroke_color=d_cfg.get("stroke_color"),
         stroke_width_norm=d_cfg.get("stroke_width", 0.0),
     )
 
     if "static_label" in layout:
         lbl = layout["static_label"]
         draw_styled_text(
-            canvas,
-            text=lbl["text"],
-            x_norm=lbl["x"],
-            y_norm=lbl["y"],
-            font_name=lbl["font"],
-            size_norm=lbl["size"],
-            fill=lbl["fill"],
-            anchor=lbl["anchor"],
+            canvas, text=lbl["text"], x_norm=lbl["x"], y_norm=lbl["y"],
+            font_name=lbl["font"], size_norm=lbl["size"], fill=lbl["fill"], anchor=lbl["anchor"],
         )
 
     mp = layout["main_pair"]
     draw_styled_text(
-        canvas,
-        text=numbers["header"],
-        x_norm=mp["x"],
-        y_norm=mp["y"],
-        font_name=mp["font"],
-        size_norm=mp["size"],
-        fill=mp["fill"],
-        anchor=mp["anchor"],
-        stroke_color=mp.get("stroke_color"),
-        stroke_width_norm=mp.get("stroke_width", 0.0),
+        canvas, text=numbers["header"], x_norm=mp["x"], y_norm=mp["y"],
+        font_name=mp["font"], size_norm=mp["size"], fill=mp["fill"], anchor=mp["anchor"],
+        stroke_color=mp.get("stroke_color"), stroke_width_norm=mp.get("stroke_width", 0.0),
         gradient=mp.get("gradient"),
     )
 
     g_cfg = layout["grid"]
     if g_cfg["mode"] == "columns":
-        for row_idx, val in enumerate(numbers["row_a"]):
-            draw_styled_text(
-                canvas,
-                text=val,
-                x_norm=g_cfg["col_a_x"],
-                y_norm=g_cfg["row_ys"][row_idx],
-                font_name=g_cfg["font"],
-                size_norm=g_cfg["size"],
-                fill=g_cfg["fill"],
-                anchor=g_cfg["anchor"],
-                stroke_color=g_cfg.get("stroke_color"),
-                stroke_width_norm=g_cfg.get("stroke_width", 0.0),
-                gradient=g_cfg.get("gradient"),
-            )
-        for row_idx, val in enumerate(numbers["row_b"]):
-            draw_styled_text(
-                canvas,
-                text=val,
-                x_norm=g_cfg["col_b_x"],
-                y_norm=g_cfg["row_ys"][row_idx],
-                font_name=g_cfg["font"],
-                size_norm=g_cfg["size"],
-                fill=g_cfg["fill"],
-                anchor=g_cfg["anchor"],
-                stroke_color=g_cfg.get("stroke_color"),
-                stroke_width_norm=g_cfg.get("stroke_width", 0.0),
-                gradient=g_cfg.get("gradient"),
-            )
+        for col_x, row_vals in ((g_cfg["col_a_x"], numbers["row_a"]), (g_cfg["col_b_x"], numbers["row_b"])):
+            for row_idx, val in enumerate(row_vals):
+                draw_styled_text(
+                    canvas, text=val, x_norm=col_x, y_norm=g_cfg["row_ys"][row_idx],
+                    font_name=g_cfg["font"], size_norm=g_cfg["size"], fill=g_cfg["fill"],
+                    anchor=g_cfg["anchor"], stroke_color=g_cfg.get("stroke_color"),
+                    stroke_width_norm=g_cfg.get("stroke_width", 0.0), gradient=g_cfg.get("gradient"),
+                )
     else:
         for row_idx, pair_list in enumerate((numbers["row_a"], numbers["row_b"])):
-            line_text = " ".join(pair_list)
             draw_styled_text(
-                canvas,
-                text=line_text,
-                x_norm=g_cfg["x"],
-                y_norm=g_cfg["row_ys"][row_idx],
-                font_name=g_cfg["font"],
-                size_norm=g_cfg["size"],
-                fill=g_cfg["fill"],
-                anchor=g_cfg["anchor"],
-                stroke_color=g_cfg.get("stroke_color"),
+                canvas, text=" ".join(pair_list), x_norm=g_cfg["x"], y_norm=g_cfg["row_ys"][row_idx],
+                font_name=g_cfg["font"], size_norm=g_cfg["size"], fill=g_cfg["fill"],
+                anchor=g_cfg["anchor"], stroke_color=g_cfg.get("stroke_color"),
                 stroke_width_norm=g_cfg.get("stroke_width", 0.0),
             )
 
@@ -465,30 +377,17 @@ def render_card(tpl_cfg: dict, market: dict, numbers: dict, date_str: str, out_p
     if td_cfg["mode"] == "stack":
         for idx, val in enumerate(numbers["three_digits"]):
             draw_styled_text(
-                canvas,
-                text=val,
-                x_norm=td_cfg["x"],
-                y_norm=td_cfg["ys"][idx],
-                font_name=td_cfg["font"],
-                size_norm=td_cfg["size"],
-                fill=td_cfg["fill"],
-                anchor=td_cfg["anchor"],
-                stroke_color=td_cfg.get("stroke_color"),
+                canvas, text=val, x_norm=td_cfg["x"], y_norm=td_cfg["ys"][idx],
+                font_name=td_cfg["font"], size_norm=td_cfg["size"], fill=td_cfg["fill"],
+                anchor=td_cfg["anchor"], stroke_color=td_cfg.get("stroke_color"),
                 stroke_width_norm=td_cfg.get("stroke_width", 0.0),
             )
     else:
         draw_styled_text(
-            canvas,
-            text=" ".join(numbers["three_digits"]),
-            x_norm=td_cfg["x"],
-            y_norm=td_cfg["y"],
-            font_name=td_cfg["font"],
-            size_norm=td_cfg["size"],
-            fill=td_cfg["fill"],
-            anchor=td_cfg["anchor"],
-            stroke_color=td_cfg.get("stroke_color"),
-            stroke_width_norm=td_cfg.get("stroke_width", 0.0),
-            gradient=td_cfg.get("gradient"),
+            canvas, text=" ".join(numbers["three_digits"]), x_norm=td_cfg["x"], y_norm=td_cfg["y"],
+            font_name=td_cfg["font"], size_norm=td_cfg["size"], fill=td_cfg["fill"],
+            anchor=td_cfg["anchor"], stroke_color=td_cfg.get("stroke_color"),
+            stroke_width_norm=td_cfg.get("stroke_width", 0.0), gradient=td_cfg.get("gradient"),
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -545,18 +444,18 @@ def telegram_request(url: str, data: dict, files: dict | None = None) -> str:
             continue
         if not resp.ok:
             raise RuntimeError(f"Telegram HTTP {resp.status_code}: {resp.text}")
-        payload = resp.json()
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid JSON from Telegram: {resp.text[:200]}") from exc
         if not payload.get("ok"):
             raise RuntimeError(f"Telegram API error: {payload}")
         return str(data.get("chat_id", ""))
     raise RuntimeError(f"Telegram API failed after retries: {url}")
 
 
-def send_template_group(
-    token: str, chat_id: str, header_text: str, image_paths: list[Path]
-) -> str:
+def send_template_group(token: str, chat_id: str, header_text: str, image_paths: list[Path]) -> str:
     base_url = f"https://api.telegram.org/bot{token}"
-
     chat_id = telegram_request(
         f"{base_url}/sendMessage",
         data={"chat_id": chat_id, "text": header_text},
@@ -566,7 +465,6 @@ def send_template_group(
     chunk_size = 10
     for start in range(0, len(image_paths), chunk_size):
         chunk = image_paths[start : start + chunk_size]
-
         if len(chunk) == 1:
             with open(chunk[0], "rb") as f:
                 chat_id = telegram_request(
@@ -582,7 +480,6 @@ def send_template_group(
                     field = f"file_{idx}"
                     files[field] = stack.enter_context(open(p, "rb"))
                     media.append({"type": "photo", "media": f"attach://{field}"})
-
                 chat_id = telegram_request(
                     f"{base_url}/sendMediaGroup",
                     data={"chat_id": chat_id, "media": json.dumps(media)},
@@ -602,7 +499,6 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"libraqm active: {features.check('raqm')}")
-
     with open(BASE_DIR / "config.json", "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
