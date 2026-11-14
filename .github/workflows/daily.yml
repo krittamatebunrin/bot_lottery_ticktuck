@@ -56,12 +56,12 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          RUN_MODE: ${{ github.event.inputs.mode || 'live_send' }}
-          SKIP_SENT: ${{ github.event.inputs.skip_sent != false && '--skip-sent' || '' }}
+          RUN_MODE: ${{ inputs.mode || 'live_send' }}
+          SKIP_SENT: ${{ (inputs.skip_sent == true || inputs.skip_sent == 'true') && '--skip-sent' || '' }}
         run: python main.py --mode "$RUN_MODE" $SKIP_SENT
 
       - name: Upload preview artifacts (dry-run modes only)
-        if: ${{ (github.event.inputs.mode || 'live_send') != 'live_send' }}
+        if: ${{ (inputs.mode || 'live_send') != 'live_send' }}
         uses: actions/upload-artifact@v4
         with:
           name: preview-images
